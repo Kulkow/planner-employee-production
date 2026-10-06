@@ -1,0 +1,42 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: production-planner:local
+    init: true
+    working_dir: /app
+    ports:
+      - "8096:8096"
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./planner:/app/planner
+    command: ["python", "-m", "planner.web"]
+
+  planner:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: production-planner:local
+    init: true
+    working_dir: /app
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./planner:/app/planner
+    command: ["python", "-m", "planner.main"]
+
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: production-planner:local
+    profiles: ["test"]
+    working_dir: /app
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./planner:/app/planner
+      - ./tests:/app/tests
+    command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]

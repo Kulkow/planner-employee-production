@@ -1,0 +1,9 @@
+.git
+.idea
+.agents
+.codex
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
