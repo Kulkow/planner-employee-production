@@ -10,6 +10,7 @@ from planner.domain.employees import (
     Employee,
     EmployeeEfficiency,
     EmployeeEquipment,
+    EmployeeWorkload,
 )
 from planner.domain.operations import (
     TechOperation,
@@ -164,6 +165,16 @@ def generate_test_data(
         count=1,
         tech_process=process,
     )
+    workload_rng = random.Random(seed + 7919)
+    workloads = []
+    for schedule in schedules:
+        planned = schedule.shift_duration_sec if schedule.is_work_day(planning_day) else 0
+        allocated = workload_rng.randint(0, min(180, planned // 60)) * 60
+        workloads.append(EmployeeWorkload(
+            employee_id=schedule.employee_id, date=planning_day,
+            planned_seconds=planned, allocated_seconds=allocated,
+            available_seconds=planned - allocated,
+        ))
     request = PlanningRequest(
         task=task,
         departments=departments,
@@ -171,6 +182,7 @@ def generate_test_data(
         efficiencies=tuple(efficiencies),
         work_schedules=tuple(schedules),
         planning_day=planning_day,
+        employee_workloads=tuple(workloads),
     )
     return TestDataSet(
         request=request,

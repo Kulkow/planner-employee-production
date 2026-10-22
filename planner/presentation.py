@@ -20,6 +20,13 @@ def job_payload(job: PlanningJob) -> dict[str, object]:
         'durationSec': job.duration_sec,
         'resultStatus': job.result.status if job.result else None,
         'error': job.error,
+        'metrics': {
+            'calculationSeconds': job.metrics.elapsed_seconds,
+            'memoryStartBytes': job.metrics.memory_start_bytes,
+            'peakRssBytes': job.metrics.peak_rss_bytes,
+            'memoryGrowthBytes': job.metrics.peak_rss_bytes - job.metrics.memory_start_bytes,
+            'memoryScope': job.metrics.memory_scope,
+        } if job.metrics else None,
     }
 
 
@@ -59,6 +66,14 @@ def plan_payload(job: PlanningJob, request: PlanningRequest) -> dict[str, object
     operations = operations_payload(plan)
     origin = datetime.combine(request.planning_day, min((s.work_start for s in request.work_schedules), default=time.min))
     outcomes = {item.department_id: item for item in job.department_results}
+    equipment_types = {
+        operation.equipment_type.id: operation.equipment_type
+        for operation in request.task.tech_process.operations
+    }
+    efficiencies = {
+        (item.employee_id, item.equipment_type_id): item.percent
+        for item in request.efficiencies
+    }
     comparison = []
     if request.compare_departments:
         for index, department in enumerate(request.departments):
@@ -69,8 +84,39 @@ def plan_payload(job: PlanningJob, request: PlanningRequest) -> dict[str, object
             comparison.append({
                 'departmentId': department.id,
                 'department': department.name,
+                'employees': [
+                    {
+                        'id': employee.id,
+                        'name': employee.full_name,
+                        'workloads': [
+                            {
+                                'employeeId': item.employee_id,
+                                'date': item.date.isoformat(),
+                                'plannedSeconds': item.planned_seconds,
+                                'allocatedSeconds': item.allocated_seconds,
+                                'availableSeconds': item.available_seconds,
+                            }
+                            for item in sorted(request.employee_workloads, key=lambda item: item.date)
+                            if item.employee_id == employee.id
+                        ],
+                        'efficiencies': [
+                            {
+                                'equipmentTypeId': qualification.equipment_type_id,
+                                'equipment': equipment_types[qualification.equipment_type_id].name
+                                if qualification.equipment_type_id in equipment_types
+                                else f'Оборудование №{qualification.equipment_type_id}',
+                                'percent': efficiencies.get((employee.id, qualification.equipment_type_id)),
+                            }
+                            for qualification in employee.equipment
+                        ],
+                    }
+                    for employee in request.employees
+                    if employee.department_id == department.id
+                ],
                 'status': ('completed' if scenario else 'failed') if item else (
-                    'running' if job.status.value == 'running' and index == len(outcomes) else 'pending'),
+                    'running' if job.status.value == 'running' and (
+                        department.id in job.running_department_ids if job.running_department_ids else index == len(outcomes)
+                    ) else 'pending'),
                 'solverStatus': scenario.status if scenario else None,
                 'error': item.error if item else None,
                 'selected': scenario is not None and scenario == job.result,
@@ -91,6 +137,7 @@ def plan_payload(job: PlanningJob, request: PlanningRequest) -> dict[str, object
         "horizonDays": request.horizon_days,
         "planningOrigin": origin.isoformat(),
         "completedDepartments": len(job.department_results),
+        "runningDepartmentIds": list(job.running_department_ids),
         "departmentComparison": comparison,
         "status": plan.status if plan else None,
         "productCardId": request.task.product_card_id,

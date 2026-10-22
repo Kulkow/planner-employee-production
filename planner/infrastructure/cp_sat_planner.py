@@ -33,6 +33,58 @@ class _OperationVariables:
     candidates: tuple[_CandidateAssignment, ...]
 
 
+class _ConstructiveSolution:
+    def __init__(self):
+        self.values: dict[int, int] = {}
+        self.bindings: list[tuple[Any, int]] = []
+
+    def set(self, variable, value: int):
+        self.values[variable.index] = value
+        self.bindings.append((variable, value))
+
+    def value(self, variable) -> int:
+        return self.values[variable.index]
+
+
+def _construct_department_schedule(request, variables, schedules, workloads):
+    """A valid incumbent for one capacity-one brigade, not an optimality claim."""
+    if len(request.departments) != 1:
+        return None
+    solution = _ConstructiveSolution()
+    used = defaultdict(int)
+    ready = 0
+    # Insertion order is unit -> stage -> group -> operation, satisfying all
+    # precedence constraints while serializing the department's work.
+    for operation in variables.values():
+        choices = []
+        for candidate in operation.candidates:
+            employee_id = candidate.employee.id
+            schedule = schedules[employee_id]
+            for offset in range(ready // SECONDS_PER_DAY, request.horizon_days):
+                day = request.planning_day + timedelta(days=offset)
+                if not schedule.is_work_day(day):
+                    continue
+                workload = workloads.get((employee_id, day))
+                available = workload.available_seconds if workload else schedule.shift_duration_sec
+                if used[(employee_id, day)] + candidate.duration_sec > available:
+                    continue
+                start = max(ready, offset * SECONDS_PER_DAY + _seconds_since_midnight(schedule.work_start))
+                end = start + candidate.duration_sec
+                if end <= offset * SECONDS_PER_DAY + _seconds_since_midnight(schedule.work_end):
+                    choices.append((end, start, employee_id, candidate, day))
+                    break
+        if not choices:
+            return None
+        end, start, employee_id, assignment, day = min(choices, key=lambda choice: choice[:3])
+        solution.set(operation.start, start)
+        solution.set(operation.end, end)
+        for candidate in operation.candidates:
+            solution.set(candidate.selected, int(candidate is assignment))
+        used[(employee_id, day)] += assignment.duration_sec
+        ready = end
+    return solution
+
+
 class CpSatProductionPlanner:
     """Assign operations to qualified employees and minimize completion time."""
 
@@ -53,6 +105,12 @@ class CpSatProductionPlanner:
             schedule.employee_id: schedule for schedule in request.work_schedules
         }
         horizon_sec = request.horizon_days * SECONDS_PER_DAY
+        workloads = {
+            (item.employee_id, item.date): item
+            for item in request.employee_workloads
+            if 0 <= (item.date - request.planning_day).days < request.horizon_days
+        }
+        daily_work_terms: dict[tuple[int, Any], list[Any]] = defaultdict(list)
         process = request.task.tech_process
 
         operation_locations: dict[int, tuple[int, str, TechOperation]] = {}
@@ -80,6 +138,11 @@ class CpSatProductionPlanner:
                 start = model.new_int_var(0, horizon_sec, f"start_{suffix}")
                 end = model.new_int_var(0, horizon_sec, f"end_{suffix}")
                 candidates: list[_CandidateAssignment] = []
+                day_flags: dict[int, Any] = {}
+                operation_day = None
+                if workloads:
+                    operation_day = model.new_int_var(0, request.horizon_days - 1, f'day_{suffix}')
+                    model.add_division_equality(operation_day, start, SECONDS_PER_DAY)
 
                 for employee in request.employees:
                     schedule = schedules[employee.id]
@@ -98,6 +161,10 @@ class CpSatProductionPlanner:
                          offset * SECONDS_PER_DAY + _seconds_since_midnight(schedule.work_end) - duration_sec]
                         for offset in range(request.horizon_days)
                         if schedule.is_work_day(request.planning_day + timedelta(days=offset))
+                        and (
+                            (workload := workloads.get((employee.id, request.planning_day + timedelta(days=offset)))) is None
+                            or duration_sec <= workload.available_seconds
+                        )
                     ]
                     if not windows:
                         continue
@@ -132,6 +199,20 @@ class CpSatProductionPlanner:
                     candidates.append(assignment)
                     intervals_by_employee[employee.id].append(interval)
                     intervals_by_department[employee.department_id].append(interval)
+                    for (member_id, day), workload in workloads.items():
+                        if member_id != employee.id:
+                            continue
+                        offset = (day - request.planning_day).days
+                        if offset not in day_flags:
+                            on_day = model.new_bool_var(f'on_day_{offset}_{suffix}')
+                            model.add(operation_day == offset).only_enforce_if(on_day)
+                            model.add(operation_day != offset).only_enforce_if(on_day.Not())
+                            day_flags[offset] = on_day
+                        assigned_on_day = model.new_bool_var(f'assigned_day_{employee.id}_{offset}_{suffix}')
+                        model.add(assigned_on_day <= selected)
+                        model.add(assigned_on_day <= day_flags[offset])
+                        model.add(assigned_on_day >= selected + day_flags[offset] - 1)
+                        daily_work_terms[(employee.id, day)].append(duration_sec * assigned_on_day)
                     duration_terms.append(duration_sec * selected)
 
                 if not candidates:
@@ -188,6 +269,8 @@ class CpSatProductionPlanner:
         # Exactly one selected employee also means exactly one brigade per operation.
         for intervals in intervals_by_department.values():
             model.add_no_overlap(intervals)
+        for key, terms in daily_work_terms.items():
+            model.add(sum(terms) <= workloads[key].available_seconds)
 
         for unit_number in range(1, request.task.count + 1):
             for stage in process.stages:
@@ -219,6 +302,11 @@ class CpSatProductionPlanner:
         # Avoid multiplying by a horizon-sized third weight (int64 overflow).
         model.minimize(makespan_end * (max_duration_sum + 1) + sum(duration_terms))
 
+        constructive = _construct_department_schedule(request, variables, schedules, workloads)
+        if constructive is not None:
+            for variable, value in constructive.bindings:
+                model.add_hint(variable, value)
+
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = self._max_time_sec
         solver.parameters.num_search_workers = 1
@@ -238,6 +326,7 @@ class CpSatProductionPlanner:
         feasibility_status = feasibility_solver.solve(feasibility_model)
 
         if feasibility_status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            model.clear_hints()
             for operation_variables in variables.values():
                 model.add_hint(
                     operation_variables.start,
@@ -261,6 +350,9 @@ class CpSatProductionPlanner:
             # ``OPTIMAL`` here only means that the feasibility model (which has
             # no objective) was solved.  Do not mislabel the returned fallback
             # as an optimal production plan.
+            status = cp_model.FEASIBLE
+        elif constructive is not None and feasibility_status == optimization_status == cp_model.UNKNOWN:
+            solver = constructive
             status = cp_model.FEASIBLE
         else:
             if cp_model.INFEASIBLE in (feasibility_status, optimization_status):

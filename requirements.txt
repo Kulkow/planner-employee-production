@@ -4,4 +4,6 @@ uvicorn==0.54.0
 redis==6.4.0
 pydantic==2.14.1
 httpx==0.28.1
+psycopg[binary]==3.3.6
+psutil==7.2.2
 

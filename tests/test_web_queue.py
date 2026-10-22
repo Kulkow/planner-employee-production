@@ -136,11 +136,15 @@ class WebQueueTest(unittest.TestCase):
         self.assertEqual(self.redis.xpending(self.store.stream, self.store.group)['pending'], 0)
 
     def test_full_department_comparison_survives_redis_and_sse(self):
+        from dataclasses import replace
         from types import SimpleNamespace
         from test_department_planning import request_for_test
         from planner.application import ProductionPlanningService
         from planner.infrastructure.cp_sat_planner import CpSatProductionPlanner
-        with patch('planner.web.generate_test_data', return_value=SimpleNamespace(request=request_for_test())):
+        from planner.domain.employees import EmployeeWorkload
+        fixture = request_for_test()
+        fixture = replace(fixture, employee_workloads=(EmployeeWorkload(1, fixture.planning_day, 28800, 10800, 18000),))
+        with patch('planner.web.generate_test_data', return_value=SimpleNamespace(request=fixture)):
             response = self.client.post('/api/jobs', json={'count': 2, 'planning_day': '2026-10-05', 'horizon_days': 1})
         self.assertEqual(response.status_code, 202)
         data = response.json()
@@ -148,11 +152,23 @@ class WebQueueTest(unittest.TestCase):
         self.assertTrue(pending['comparisonMode'])
         self.assertEqual(len(pending['departmentComparison']), 2)
         self.assertEqual(pending['completedDepartments'], 0)
+        members = {item['departmentId']: item['employees'] for item in pending['departmentComparison']}
+        self.assertEqual([employee['id'] for employee in members[1]], [1, 2])
+        self.assertEqual([employee['id'] for employee in members[2]], [3])
+        self.assertEqual(members[1][0]['efficiencies'][0]['percent'], 100)
+        self.assertEqual(members[2][0]['efficiencies'][0]['percent'], 80)
+        self.assertEqual(members[2][0]['efficiencies'][0]['equipment'], 'Станок')
+        self.assertEqual(members[1][0]['workloads'], [{
+            'employeeId': 1, 'date': '2026-10-05', 'plannedSeconds': 28800,
+            'allocatedSeconds': 10800, 'availableSeconds': 18000,
+        }])
+        self.assertEqual(members[2][0]['workloads'], [])
         service = PlanningJobService(ProductionPlanningService(CpSatProductionPlanner(max_time_sec=2)), self.store)
         process_message(self.store, service, self.store.receive('comparison-worker'))
         final = self.client.get(data['resultUrl']).json()
         self.assertEqual(final['job']['status'], 'completed')
         self.assertEqual(final['completedDepartments'], 2)
+        self.assertEqual({item['departmentId']: item['employees'] for item in final['departmentComparison']}, members)
         for scenario in final['departmentComparison']:
             self.assertEqual(len(scenario['operations']), 4)
             self.assertEqual({operation['departmentId'] for operation in scenario['operations']}, {scenario['departmentId']})

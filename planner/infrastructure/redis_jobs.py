@@ -2,15 +2,13 @@
 
 import os
 
-from pydantic import TypeAdapter
 from redis import Redis
 from redis.exceptions import ResponseError
 
 from planner.application.planning import PlanningRequest
 from planner.domain.jobs import PlanningJob
 
-JOB_CODEC = TypeAdapter(PlanningJob)
-REQUEST_CODEC = TypeAdapter(PlanningRequest)
+from planner.infrastructure.serialization import JOB_CODEC, REQUEST_CODEC
 
 
 def redis_url() -> str:

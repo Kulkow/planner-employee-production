@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Protocol
 
-from planner.domain.employees import Department, Employee, EmployeeEfficiency
+from planner.domain.employees import Department, Employee, EmployeeEfficiency, EmployeeWorkload
 from planner.domain.planning import ProductionPlan
 from planner.domain.production import ProductionTask
 from planner.domain.schedules import WorkSchedule
@@ -20,6 +20,7 @@ class PlanningRequest:
     planning_day: date
     horizon_days: int = 1
     compare_departments: bool = False
+    employee_workloads: tuple[EmployeeWorkload, ...] = ()
 
     def __post_init__(self) -> None:
         if not 1 <= self.horizon_days <= 60:
@@ -68,5 +69,17 @@ class ProductionPlanningService:
             )
         if employee_ids != schedule_employee_ids:
             raise ValueError("Every employee must have one work schedule")
+
+        schedules = {schedule.employee_id: schedule for schedule in request.work_schedules}
+        workload_keys = {(item.employee_id, item.date) for item in request.employee_workloads}
+        if len(workload_keys) != len(request.employee_workloads):
+            raise ValueError('Employee workload keys must be unique for each date')
+        for item in request.employee_workloads:
+            if item.employee_id not in employee_ids:
+                raise ValueError('Workload must belong to a known employee')
+            schedule = schedules[item.employee_id]
+            capacity = schedule.shift_duration_sec if schedule.is_work_day(item.date) else 0
+            if item.planned_seconds > capacity:
+                raise ValueError('Planned workload time cannot exceed the working shift')
 
         return self._planner.plan(request)

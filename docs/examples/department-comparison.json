@@ -1,0 +1,52 @@
+{
+  "productCardId": 1001,
+  "count": 1,
+  "planningOrigin": "2026-10-05T08:30:00",
+  "horizonDays": 14,
+  "scenarios": [
+    {
+      "departmentId": 1,
+      "department": "Бригада №1",
+      "solverStatus": "FEASIBLE",
+      "selected": false,
+      "start": "2026-10-05T08:30:00",
+      "end": "2026-10-06T12:30:57",
+      "workSec": 43105,
+      "elapsedSec": 100857,
+      "operationCount": 47
+    },
+    {
+      "departmentId": 2,
+      "department": "Бригада №2",
+      "solverStatus": "FEASIBLE",
+      "selected": true,
+      "start": "2026-10-05T08:30:00",
+      "end": "2026-10-06T12:11:12",
+      "workSec": 41951,
+      "elapsedSec": 99672,
+      "operationCount": 47
+    },
+    {
+      "departmentId": 3,
+      "department": "Бригада №3",
+      "solverStatus": "FEASIBLE",
+      "selected": false,
+      "start": "2026-10-05T08:30:00",
+      "end": "2026-10-06T13:10:04",
+      "workSec": 45562,
+      "elapsedSec": 103204,
+      "operationCount": 47
+    },
+    {
+      "departmentId": 4,
+      "department": "Бригада №4",
+      "solverStatus": "FEASIBLE",
+      "selected": false,
+      "start": "2026-10-05T08:31:18",
+      "end": "2026-10-06T13:43:01",
+      "workSec": 47446,
+      "elapsedSec": 105181,
+      "operationCount": 47
+    }
+  ]
+}

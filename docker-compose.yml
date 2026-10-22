@@ -14,7 +14,10 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL:-postgresql://planner:planner@postgres:5432/planner}
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       worker:
@@ -22,6 +25,22 @@ services:
     volumes:
       - ./planner:/app/planner
     command: ["python", "-m", "planner.web"]
+
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: planner
+      POSTGRES_PASSWORD: planner
+      POSTGRES_DB: planner
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/001-test-database.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planner -d planner"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   redis:
     image: redis:7.4-alpine
@@ -43,8 +62,12 @@ services:
     working_dir: /app
     environment:
       PYTHONUNBUFFERED: "1"
+      DEPARTMENT_PROCESSES: ${DEPARTMENT_PROCESSES:-4}
       REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: ${DATABASE_URL:-postgresql://planner:planner@postgres:5432/planner}
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
@@ -80,7 +103,10 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: redis://redis:6379/1
+      DATABASE_URL: postgresql://planner:planner@postgres:5432/planner_test
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
@@ -89,4 +115,5 @@ services:
     command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
 
 volumes:
+  postgres-data:
   redis-data:

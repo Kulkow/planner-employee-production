@@ -1,7 +1,7 @@
 """Employee aggregate entities described in docs/employee."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date as CalendarDate, datetime
 
 
 @dataclass(frozen=True)
@@ -42,3 +42,21 @@ class EmployeeEfficiency:
     def __post_init__(self) -> None:
         if not 1 <= self.percent <= 100:
             raise ValueError("Employee efficiency must be between 1 and 100 percent")
+
+
+@dataclass(frozen=True)
+class EmployeeWorkload:
+    employee_id: int
+    date: CalendarDate
+    planned_seconds: int
+    allocated_seconds: int
+    available_seconds: int
+
+    def __post_init__(self) -> None:
+        values = (self.planned_seconds, self.allocated_seconds, self.available_seconds)
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError('Workload seconds must be non-negative integers')
+        if self.allocated_seconds > self.planned_seconds:
+            raise ValueError('Allocated time cannot exceed planned time')
+        if self.available_seconds != self.planned_seconds - self.allocated_seconds:
+            raise ValueError('Available time must equal planned minus allocated time')
