@@ -3,6 +3,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
     image: production-planner:local
     init: true
     working_dir: /app
@@ -10,14 +13,51 @@ services:
       - "8096:8096"
     environment:
       PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      worker:
+        condition: service_started
     volumes:
       - ./planner:/app/planner
     command: ["python", "-m", "planner.web"]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker:
+    image: production-planner:local
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 150s
+    working_dir: /app
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./planner:/app/planner
+    command: ["python", "-m", "planner.worker"]
 
   planner:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
     image: production-planner:local
     init: true
     working_dir: /app
@@ -31,12 +71,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${BUILD_HTTP_PROXY:-}
+        HTTPS_PROXY: ${BUILD_HTTPS_PROXY:-}
     image: production-planner:local
     profiles: ["test"]
     working_dir: /app
     environment:
       PYTHONUNBUFFERED: "1"
+      REDIS_URL: redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
     volumes:
       - ./planner:/app/planner
       - ./tests:/app/tests
     command: ["python", "-m", "unittest", "discover", "-s", "tests", "-v"]
+
+volumes:
+  redis-data:

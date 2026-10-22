@@ -1,6 +1,7 @@
 """Integration tests for employee assignment by CP-SAT."""
 
 from collections import defaultdict
+from dataclasses import replace
 import math
 import unittest
 
@@ -13,7 +14,19 @@ class CpSatProductionPlannerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.data = generate_test_data()
-        cls.request = cls.data.request
+        # Keep the integration scenario inside one shift independently of
+        # demonstration data, which can describe a multi-day process.
+        request = cls.data.request
+        process = request.task.tech_process
+        process = replace(process, stages=tuple(
+            replace(stage, groups=tuple(
+                replace(group, operations=tuple(
+                    replace(operation, norm_sec=min(operation.norm_sec, 300))
+                    for operation in group.operations
+                )) for group in stage.groups
+            )) for stage in process.stages
+        ))
+        cls.request = replace(request, task=replace(request.task, tech_process=process))
         cls.plan = ProductionPlanningService(
             CpSatProductionPlanner(max_time_sec=20)
         ).create_plan(cls.request)
@@ -29,11 +42,39 @@ class CpSatProductionPlannerTest(unittest.TestCase):
         }
         self.assertEqual(expected_count, len(keys))
 
-    def test_assignments_use_all_specialized_departments(self) -> None:
-        self.assertEqual(
-            {department.id for department in self.request.departments},
+    def test_rejects_process_that_cannot_fit_in_a_day(self) -> None:
+        process = self.request.task.tech_process
+        process = replace(process, stages=tuple(
+            replace(stage, groups=tuple(
+                replace(group, operations=tuple(
+                    replace(operation, norm_sec=5000) for operation in group.operations
+                )) for group in stage.groups
+            )) for stage in process.stages
+        ))
+        request = replace(self.request, task=replace(self.request.task, tech_process=process))
+        with self.assertRaisesRegex(ValueError, 'План не помещается в рабочий день'):
+            CpSatProductionPlanner().plan(request)
+
+    def test_unknown_explains_time_limit(self) -> None:
+        from unittest.mock import patch
+        from ortools.sat.python import cp_model
+
+        with patch.object(cp_model.CpSolver, 'solve', return_value=cp_model.UNKNOWN):
+            with self.assertRaisesRegex(RuntimeError, 'За отведённое время'):
+                CpSatProductionPlanner().plan(self.request)
+
+    def test_assignments_use_known_departments_without_overlaps(self) -> None:
+        self.assertLessEqual(
             {operation.department_id for operation in self.plan.operations},
+            {department.id for department in self.request.departments},
         )
+        for department in self.request.departments:
+            operations = sorted(
+                (operation for operation in self.plan.operations if operation.department_id == department.id),
+                key=lambda operation: operation.starts_at,
+            )
+            for previous, current in zip(operations, operations[1:]):
+                self.assertLessEqual(previous.ends_at, current.starts_at)
 
     def test_employee_is_qualified_and_efficiency_changes_duration(self) -> None:
         employees = {employee.id: employee for employee in self.request.employees}

@@ -18,6 +18,12 @@ class PlanningRequest:
     efficiencies: tuple[EmployeeEfficiency, ...]
     work_schedules: tuple[WorkSchedule, ...]
     planning_day: date
+    horizon_days: int = 1
+    compare_departments: bool = False
+
+    def __post_init__(self) -> None:
+        if not 1 <= self.horizon_days <= 60:
+            raise ValueError('Planning horizon must be between 1 and 60 days')
 
 
 class ProductionPlanner(Protocol):

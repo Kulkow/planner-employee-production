@@ -1,2 +1,7 @@
 ortools==9.15.6755
+fastapi==0.156.6
+uvicorn==0.54.0
+redis==6.4.0
+pydantic==2.14.1
+httpx==0.28.1
 

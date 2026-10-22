@@ -11,7 +11,7 @@ from ortools.sat.python import cp_model
 from planner.application import PlanningRequest
 from planner.domain.employees import Employee
 from planner.domain.operations import TechOperation
-from planner.domain.planning import ProductionPlan, ScheduledOperation
+from planner.domain.planning import DepartmentOption, ProductionPlan, ScheduledOperation
 
 
 SECONDS_PER_DAY = 24 * 60 * 60
@@ -52,6 +52,7 @@ class CpSatProductionPlanner:
         schedules = {
             schedule.employee_id: schedule for schedule in request.work_schedules
         }
+        horizon_sec = request.horizon_days * SECONDS_PER_DAY
         process = request.task.tech_process
 
         operation_locations: dict[int, tuple[int, str, TechOperation]] = {}
@@ -68,6 +69,7 @@ class CpSatProductionPlanner:
 
         variables: dict[tuple[int, int], _OperationVariables] = {}
         intervals_by_employee: dict[int, list[Any]] = defaultdict(list)
+        intervals_by_department: dict[int, list[Any]] = defaultdict(list)
         duration_terms: list[Any] = []
         max_duration_sum = 0
 
@@ -75,15 +77,13 @@ class CpSatProductionPlanner:
             for operation in process.operations:
                 key = (unit_number, operation.id)
                 suffix = f"u{unit_number}_o{operation.id}"
-                start = model.new_int_var(0, SECONDS_PER_DAY, f"start_{suffix}")
-                end = model.new_int_var(0, SECONDS_PER_DAY, f"end_{suffix}")
+                start = model.new_int_var(0, horizon_sec, f"start_{suffix}")
+                end = model.new_int_var(0, horizon_sec, f"end_{suffix}")
                 candidates: list[_CandidateAssignment] = []
 
                 for employee in request.employees:
                     schedule = schedules[employee.id]
                     if not employee.can_use(operation.equipment_type.id):
-                        continue
-                    if not schedule.is_work_day(request.planning_day):
                         continue
 
                     efficiency = efficiencies[
@@ -93,11 +93,20 @@ class CpSatProductionPlanner:
                     if duration_sec > schedule.shift_duration_sec:
                         continue
 
+                    windows = [
+                        [offset * SECONDS_PER_DAY + _seconds_since_midnight(schedule.work_start),
+                         offset * SECONDS_PER_DAY + _seconds_since_midnight(schedule.work_end) - duration_sec]
+                        for offset in range(request.horizon_days)
+                        if schedule.is_work_day(request.planning_day + timedelta(days=offset))
+                    ]
+                    if not windows:
+                        continue
+
                     selected = model.new_bool_var(
                         f"employee_{employee.id}_{suffix}"
                     )
                     candidate_end = model.new_int_var(
-                        0, SECONDS_PER_DAY, f"candidate_end_{employee.id}_{suffix}"
+                        0, horizon_sec, f"candidate_end_{employee.id}_{suffix}"
                     )
                     interval = model.new_optional_interval_var(
                         start,
@@ -106,10 +115,11 @@ class CpSatProductionPlanner:
                         selected,
                         f"interval_{employee.id}_{suffix}",
                     )
-                    shift_start = _seconds_since_midnight(schedule.work_start)
-                    shift_end = _seconds_since_midnight(schedule.work_end)
-                    model.add(start >= shift_start).only_enforce_if(selected)
-                    model.add(candidate_end <= shift_end).only_enforce_if(selected)
+                    # Each operation must fit entirely in one working shift;
+                    # nights and weekends are excluded from its start domain.
+                    model.add_linear_expression_in_domain(
+                        start, cp_model.Domain.from_intervals(windows),
+                    ).only_enforce_if(selected)
                     model.add(end == candidate_end).only_enforce_if(selected)
 
                     assignment = _CandidateAssignment(
@@ -121,12 +131,13 @@ class CpSatProductionPlanner:
                     )
                     candidates.append(assignment)
                     intervals_by_employee[employee.id].append(interval)
+                    intervals_by_department[employee.department_id].append(interval)
                     duration_terms.append(duration_sec * selected)
 
                 if not candidates:
                     raise ValueError(
-                        "No available qualified employee for operation "
-                        f"{operation.id} ({operation.equipment_type.code})"
+                        "Нет доступного квалифицированного исполнителя для операции "
+                        f"{operation.id} ({operation.equipment_type.code}) в выбранном горизонте"
                     )
                 model.add_exactly_one(
                     [candidate.selected for candidate in candidates]
@@ -140,7 +151,42 @@ class CpSatProductionPlanner:
                     candidates=tuple(candidates),
                 )
 
+        # Even unlimited parallel resources cannot shorten a sequential group
+        # or start the next stage before the previous stage has finished.
+        minimum_duration = sum(
+            max(
+                sum(
+                    min(candidate.duration_sec for candidate in variables[(1, operation.id)].candidates)
+                    for operation in group.operations
+                )
+                for group in stage.groups
+            )
+            for stage in process.stages
+        )
+        available_schedules = [
+            schedules[candidate.employee.id]
+            for operation in variables.values()
+            for candidate in operation.candidates
+        ]
+        available_span = max(
+            _seconds_since_midnight(schedule.work_end) for schedule in available_schedules
+        ) - min(
+            _seconds_since_midnight(schedule.work_start) for schedule in available_schedules
+        )
+        available_span += (request.horizon_days - 1) * SECONDS_PER_DAY
+        if minimum_duration > available_span:
+            raise ValueError(
+                "План не помещается в рабочий день: даже без ожидания сотрудников "
+                f"техпроцесс одного изделия требует минимум {_format_duration(minimum_duration)}, "
+                f"доступно {_format_duration(available_span)}. "
+                "Увеличьте горизонт планирования."
+            )
+
         for intervals in intervals_by_employee.values():
+            model.add_no_overlap(intervals)
+        # A brigade is a Department, with capacity one regardless of headcount.
+        # Exactly one selected employee also means exactly one brigade per operation.
+        for intervals in intervals_by_department.values():
             model.add_no_overlap(intervals)
 
         for unit_number in range(1, request.task.count + 1):
@@ -164,20 +210,14 @@ class CpSatProductionPlanner:
                             >= variables[(unit_number, previous.id)].end
                         )
 
-        makespan_end = model.new_int_var(0, SECONDS_PER_DAY, "makespan_end")
+        makespan_end = model.new_int_var(0, horizon_sec, "makespan_end")
         model.add_max_equality(
             makespan_end, [operation.end for operation in variables.values()]
         )
 
-        # Lexicographic intent encoded as weights: makespan, labor time, early starts.
-        max_start_sum = SECONDS_PER_DAY * len(variables)
-        duration_weight = max_start_sum + 1
-        makespan_weight = (max_duration_sum + 1) * duration_weight
-        model.minimize(
-            makespan_end * makespan_weight
-            + sum(duration_terms) * duration_weight
-            + sum(operation.start for operation in variables.values())
-        )
+        # Lexicographic priorities: completion time, then total labor time.
+        # Avoid multiplying by a horizon-sized third weight (int64 overflow).
+        model.minimize(makespan_end * (max_duration_sum + 1) + sum(duration_terms))
 
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = self._max_time_sec
@@ -223,9 +263,17 @@ class CpSatProductionPlanner:
             # as an optimal production plan.
             status = cp_model.FEASIBLE
         else:
+            if cp_model.INFEASIBLE in (feasibility_status, optimization_status):
+                raise RuntimeError(
+                    "Не удалось составить план в пределах горизонта планирования: "
+                    "ограничения по сотрудникам, времени и порядку операций несовместимы."
+                )
+            if cp_model.MODEL_INVALID in (feasibility_status, optimization_status):
+                raise RuntimeError("Ошибка модели планирования. Проверьте параметры расчёта.")
             raise RuntimeError(
-                "Schedule was not found: "
-                f"{_status_name(optimization_status)}"
+                "За отведённое время решатель не нашёл план. "
+                "Это не означает, что план невозможен. "
+                "Попробуйте уменьшить количество изделий или увеличить время расчёта."
             )
 
         day_start = datetime.combine(request.planning_day, time.min)
@@ -242,6 +290,9 @@ class CpSatProductionPlanner:
             department = departments[employee.department_id]
             start_sec = solver.value(operation_variables.start)
             end_sec = solver.value(operation_variables.end)
+            candidates_by_department: dict[int, list[_CandidateAssignment]] = defaultdict(list)
+            for candidate in operation_variables.candidates:
+                candidates_by_department[candidate.employee.department_id].append(candidate)
             scheduled.append(
                 ScheduledOperation(
                     unit_number=unit_number,
@@ -258,6 +309,15 @@ class CpSatProductionPlanner:
                     duration_sec=assignment.duration_sec,
                     starts_at=day_start + timedelta(seconds=start_sec),
                     ends_at=day_start + timedelta(seconds=end_sec),
+                    department_options=tuple(
+                        DepartmentOption(
+                            department_id=department_id,
+                            department_name=departments[department_id].name,
+                            min_duration_sec=min(candidate.duration_sec for candidate in candidates),
+                            qualified_employee_count=len(candidates),
+                        )
+                        for department_id, candidates in sorted(candidates_by_department.items())
+                    ),
                 )
             )
 
@@ -282,6 +342,11 @@ class CpSatProductionPlanner:
 
 def _seconds_since_midnight(value: time) -> int:
     return value.hour * 3600 + value.minute * 60 + value.second
+
+
+def _format_duration(seconds: int) -> str:
+    minutes = math.ceil(seconds / 60)
+    return f"{minutes // 60} ч {minutes % 60} мин"
 
 
 def _status_name(status: Any) -> str:

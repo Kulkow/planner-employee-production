@@ -42,10 +42,10 @@ def generate_test_data(
 
     rng = random.Random(seed)
     department_names = (
-        "Раскрой",
-        "Механическая обработка",
-        "Сборка",
-        "Контроль качества",
+        "Бригада №1",
+        "Бригада №2",
+        "Бригада №3",
+        "Бригада №4",
     )
     equipment_specs = (
         (1, "Лазерный станок", "LASER"),
@@ -92,10 +92,11 @@ def generate_test_data(
     employee_id = 1
     equipment_link_id = 1
 
-    for department, equipment_type, first_name in zip(
-        departments, equipment_types, first_names
-    ):
-        for last_name in last_names:
+    for department, first_name in zip(departments, first_names):
+        for member_index, last_name in enumerate(last_names):
+            # Each brigade has all four specializations, so the solver really
+            # chooses between departments for every operation.
+            equipment_type = equipment_types[(member_index + department.id - 1) % len(equipment_types)]
             equipment = EmployeeEquipment(
                 id=equipment_link_id,
                 employee_id=employee_id,
@@ -141,7 +142,7 @@ def generate_test_data(
                 operations.append(
                     TechOperation(
                         id=operation_id,
-                        norm_sec=rng.randint(5, 30),
+                        norm_sec=rng.randint(60, 1500),
                         type=operation_types[equipment_index],
                         equipment_type=equipment_types[equipment_index],
                     )

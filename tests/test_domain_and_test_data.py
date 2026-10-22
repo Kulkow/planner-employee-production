@@ -46,8 +46,8 @@ class TestDataGeneratorTest(unittest.TestCase):
                 self.assertGreaterEqual(len(group.operations), 2)
                 self.assertLessEqual(len(group.operations), 5)
                 for operation in group.operations:
-                    self.assertGreaterEqual(operation.norm_sec, 5)
-                    self.assertLessEqual(operation.norm_sec, 30)
+                    self.assertGreaterEqual(operation.norm_sec, 60)
+                    self.assertLessEqual(operation.norm_sec, 1500)
 
     def test_every_operation_has_qualified_employees(self) -> None:
         for operation in self.request.task.tech_process.operations:
@@ -57,6 +57,10 @@ class TestDataGeneratorTest(unittest.TestCase):
                 if employee.can_use(operation.equipment_type.id)
             ]
             self.assertEqual(10, len(qualified))
+            self.assertEqual(
+                {department.id for department in self.request.departments},
+                {employee.department_id for employee in qualified},
+            )
 
     def test_work_schedule_is_five_by_two_from_0830_to_1630(self) -> None:
         schedule = self.request.work_schedules[0]
